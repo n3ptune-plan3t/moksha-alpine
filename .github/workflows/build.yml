@@ -1,0 +1,75 @@
+name: Build Alpine packages
+
+on:
+  push:
+    paths:
+      - 'efl/APKBUILD'
+      - 'moksha/APKBUILD'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Running the whole job inside an Alpine container is the direct
+    # equivalent of what you were doing for Arch via `makepkg` in a
+    # Docker container -- same idea, different distro's mechanics.
+    container:
+      image: alpine:edge
+    steps:
+      - uses: actions/checkout@v4
+
+      # alpine-sdk pulls in abuild + the base compiler toolchain.
+      # doas, not sudo: it's what abuild-keygen's $SUDO autodetection
+      # checks for FIRST, and it's the leaner of the two -- fitting,
+      # since Alpine itself favors doas over sudo where it can.
+      - name: Install build tooling
+        run: apk add --no-cache alpine-sdk doas
+
+      # abuild refuses outright to run build()/package() as root --
+      # same principle as makepkg's root refusal, enforced by a
+      # different mechanism. Container jobs default to root, so we
+      # create a real unprivileged user and do every build step as
+      # that user via `doas -u builder`.
+      - name: Create unprivileged builder user
+        run: |
+          adduser -D builder
+          addgroup builder abuild
+          echo "permit nopass builder" >> /etc/doas.conf
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      # Throwaway signing key, regenerated every run. Fine for
+      # verifying the build works; NOT what you'd want for a real
+      # published repo -- see the note below the workflow for that.
+      #   -a  append PACKAGER_PRIVKEY to ~builder/.abuild/abuild.conf
+      #   -i  install the matching pubkey into /etc/apk/keys (via doas)
+      #   -n  non-interactive, just use defaults
+      - name: Generate throwaway abuild signing key
+        run: doas -u builder abuild-keygen -a -i -n
+
+      - name: Build efl
+        working-directory: efl
+        run: doas -u builder abuild -r
+
+      # moksha's makedepends needs efl-dev (the .pc/headers efl's own
+      # subpackage produces). Install by EXACT filename, not a loose
+      # glob -- source the APKBUILD itself to get the real pkgver/
+      # pkgrel (the same thing abuild does internally; APKBUILDs are
+      # designed to be sourced, this isn't a hack). A bare */*.apk glob
+      # would happily match a stale cached version sitting alongside a
+      # fresh one if you ever add caching later.
+      - name: Install freshly-built efl + efl-dev
+        run: |
+          . efl/APKBUILD
+          apk add \
+            /home/builder/packages/*/*/efl-"$pkgver"-r"$pkgrel".apk \
+            /home/builder/packages/*/*/efl-dev-"$pkgver"-r"$pkgrel".apk
+
+      - name: Build moksha
+        working-directory: moksha
+        run: doas -u builder abuild -r
+
+      - name: Upload built .apk files
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-packages
+          path: /home/builder/packages/**/*.apk
