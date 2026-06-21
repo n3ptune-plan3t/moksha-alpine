@@ -36,6 +36,9 @@ jobs:
           addgroup builder abuild
           echo "permit nopass builder" >> /etc/doas.conf
           chown -R builder:builder "$GITHUB_WORKSPACE"
+          # Ensure doas can execute commands with proper privileges
+          chown root:root /etc/doas.conf
+          chmod 0600 /etc/doas.conf
 
       # Throwaway signing key, regenerated every run. Fine for
       # verifying the build works; NOT what you'd want for a real
@@ -44,7 +47,10 @@ jobs:
       #   -i  install the matching pubkey into /etc/apk/keys (via doas)
       #   -n  non-interactive, just use defaults
       - name: Generate throwaway abuild signing key
-        run: doas -u builder abuild-keygen -a -i -n
+        run: doas -u builder abuild-keygen -a -n
+
+      - name: Install abuild public key
+        run: cp /home/builder/.abuild/*.pub /etc/apk/keys/
 
       - name: Build efl
         working-directory: efl
